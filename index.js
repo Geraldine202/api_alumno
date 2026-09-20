@@ -238,51 +238,51 @@
     // ==========================================
 
     // 1. OBTENER TODOS LOS ALUMNOS
-    app.get('/alumnos', async (req, res) => {
-        try {
-            const { data, error } = await supabase
-                .from('usuario')
-                .select(`
+app.get('/alumnos', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('usuario')
+            .select(`
+                *,
+                carrera(
                     *,
-                    carrera(
-                        *,
-                        jornada_carrera(*),
-                        tipo_carrera(*)
-                    ),
-                    sede(descripcion),
-                    estado_matricula(descripcion),
-                    comuna(nombre_comuna),
-                    puntaje_total(puntaje),
-                    participacion_activa(total_actividades, estado),
-                    validacion_usuario(*),
-                    historial_academico(*)
-                `)
-                .eq('id_tipo_usuario', 1); 
+                    jornada_carrera(*),
+                    tipo_carrera(*)
+                ),
+                sede(descripcion),
+                estado_matricula(descripcion),
+                comuna(nombre_comuna),
+                puntaje_total(puntaje),
+                participacion_activa(total_actividades, estado),
+                validacion_usuario(*),
+                historial_academico(*)
+            `)
+            .in('id_tipo_usuario', [1, 4]); // <--- Cambio realizado aquí
 
-            if (error) throw error;
+        if (error) throw error;
 
-            const respuestaFormateada = data.map(alu => {
-                const pt = Array.isArray(alu.puntaje_total) ? alu.puntaje_total[0] : alu.puntaje_total;
-                const pa = Array.isArray(alu.participacion_activa) ? alu.participacion_activa[0] : alu.participacion_activa;
-                const ha = Array.isArray(alu.historial_academico) ? alu.historial_academico[0] : alu.historial_academico;
-                const actividadesCount = pa ? (pa.total_actividades || 0) : 0;
+        const respuestaFormateada = data.map(alu => {
+            const pt = Array.isArray(alu.puntaje_total) ? alu.puntaje_total[0] : alu.puntaje_total;
+            const pa = Array.isArray(alu.participacion_activa) ? alu.participacion_activa[0] : alu.participacion_activa;
+            const ha = Array.isArray(alu.historial_academico) ? alu.historial_academico[0] : alu.historial_academico;
+            const actividadesCount = pa ? (pa.total_actividades || 0) : 0;
 
-                return {
-                    ...alu,
-                    jornada: alu.carrera?.jornada_carrera?.descripcion || '',
-                    tipo_carrera: alu.carrera?.tipo_carrera?.descripcion || '',
-                    puntaje_total: pt ? pt.puntaje : 0,
-                    actividades_inscritas: actividadesCount,
-                    participacion_activa: actividadesCount > 1,
-                    historial_academico_resumen: ha ? ha.descripcion : ''
-                };
-            });
+            return {
+                ...alu,
+                jornada: alu.carrera?.jornada_carrera?.descripcion || '',
+                tipo_carrera: alu.carrera?.tipo_carrera?.descripcion || '',
+                puntaje_total: pt ? pt.puntaje : 0,
+                actividades_inscritas: actividadesCount,
+                participacion_activa: actividadesCount > 1,
+                historial_academico_resumen: ha ? ha.descripcion : ''
+            };
+        });
 
-            res.json(respuestaFormateada);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    });
+        res.json(respuestaFormateada);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
     // 2. OBTENER ALUMNO POR RUT
     app.get('/alumnos/:rut', async (req, res) => {
@@ -866,45 +866,71 @@ app.post('/alumnos', upload.single('foto'), async (req, res) => {
         }
     });
 
-    app.post('/auth/restablecer-password', async (req, res) => {
-        try {
-            const { token, nueva_contrasenia } = req.body;
+app.post('/auth/restablecer-password', async (req, res) => {
+    try {
+        // Soporta varios nombres de campos por si vienen del frontend con otro nombre
+        const tokenInput = req.body.token || req.body.codigo;
+        const nuevaPassword = req.body.nueva_contrasenia || req.body.nuevaContrasenia || req.body.password;
 
-            if (!token || !nueva_contrasenia) {
-                return res.status(400).json({ error: 'El código y la nueva contraseña son obligatorios.' });
-            }
-
-            const { data: registroToken, error: tokenError } = await supabase
-                .from('recuperar_contrasenia')
-                .select('*')
-                .eq('token', token)
-                .eq('usado', false)
-                .maybeSingle();
-
-            if (tokenError || !registroToken) {
-                return res.status(400).json({ error: 'Código inválido o ya utilizado.' });
-            }
-
-            if (new Date(registroToken.fecha_expiracion) < new Date()) {
-                return res.status(400).json({ error: 'El código ha expirado.' });
-            }
-
-            await supabase
-                .from('usuario')
-                .update({ contrasenia: nueva_contrasenia })
-                .eq('rut_usuario', registroToken.rut_usuario);
-
-            await supabase
-                .from('recuperar_contrasenia')
-                .update({ usado: true })
-                .eq('id_recuperacion', registroToken.id_recuperacion);
-
-            res.json({ mensaje: 'Contraseña actualizada con éxito.' });
-        } catch (error) {
-            console.error('Error al restablecer contraseña:', error.message);
-            res.status(500).json({ error: 'Error al restablecer la contraseña.' });
+        if (!tokenInput || !nuevaPassword) {
+            return res.status(400).json({ 
+                error: 'El código (token) y la nueva contraseña son obligatorios.' 
+            });
         }
-    });
+
+        const tokenString = String(tokenInput).trim();
+
+        // 1. Buscar el token en la base de datos
+        const { data: registroToken, error: tokenError } = await supabase
+            .from('recuperar_contrasenia')
+            .select('*')
+            .eq('token', tokenString)
+            .eq('usado', false)
+            .maybeSingle();
+
+        if (tokenError) {
+            console.error('Error al consultar token en Supabase:', tokenError);
+            return res.status(500).json({ error: 'Error interno de base de datos.' });
+        }
+
+        if (!registroToken) {
+            return res.status(400).json({ 
+                error: 'Código inválido o ya utilizado. Solicita un nuevo código.' 
+            });
+        }
+
+        // 2. Verificar la fecha de expiración
+        const fechaExpiracion = new Date(registroToken.fecha_expiracion).getTime();
+        const ahora = new Date().getTime();
+
+        if (fechaExpiracion < ahora) {
+            return res.status(400).json({ error: 'El código ha expirado. Solicita uno nuevo.' });
+        }
+
+        // 3. Actualizar la contraseña en la tabla usuario
+        const { error: updateError } = await supabase
+            .from('usuario')
+            .update({ contrasenia: nuevaPassword })
+            .eq('rut_usuario', registroToken.rut_usuario);
+
+        if (updateError) {
+            console.error('Error al actualizar contraseña:', updateError);
+            return res.status(500).json({ error: 'No se pudo actualizar la contraseña del usuario.' });
+        }
+
+        // 4. Marcar el token como usado
+        await supabase
+            .from('recuperar_contrasenia')
+            .update({ usado: true })
+            .eq('id_recuperacion', registroToken.id_recuperacion);
+
+        return res.json({ mensaje: 'Contraseña actualizada con éxito.' });
+
+    } catch (error) {
+        console.error('Error inesperado en /auth/restablecer-password:', error.message);
+        return res.status(500).json({ error: 'Error del servidor al restablecer contraseña.' });
+    }
+});
 
     // ==========================================
     // INICIO DEL SERVIDOR
