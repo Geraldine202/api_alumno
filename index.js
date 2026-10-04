@@ -688,6 +688,81 @@ app.get('/notificaciones/:rut', async (req, res) => {
         }
     });
 
+    // EDITAR MI PERFIL (Solo Foto, Dirección y Teléfono)
+app.put('/alumnos/perfil/:rut', upload.single('foto'), async (req, res) => {
+    try {
+        const rutFormateado = formatearRutChile(decodeURIComponent(req.params.rut));
+        const archivo = req.file;
+
+        let datos = {};
+        if (req.body.datos) {
+            datos = typeof req.body.datos === 'string' ? JSON.parse(req.body.datos) : req.body.datos;
+        } else {
+            datos = { ...req.body };
+        }
+
+        // Extraemos únicamente los campos permitidos para la edición de perfil
+        const { direccion, telefono } = datos;
+        const datosAActualizar = {};
+
+        if (direccion !== undefined) datosAActualizar.direccion = direccion;
+        if (telefono !== undefined) datosAActualizar.telefono = telefono;
+
+        // Si subió una nueva imagen/foto
+        if (archivo) {
+            // Obtenemos la imagen actual para eliminarla del storage
+            const { data: usuarioActual } = await supabase
+                .from('usuario')
+                .select('imagen')
+                .eq('rut_usuario', rutFormateado)
+                .maybeSingle();
+
+            if (usuarioActual && usuarioActual.imagen) {
+                const urlPartes = usuarioActual.imagen.split('/');
+                const nombreArchivoViejo = urlPartes[urlPartes.length - 1].split('?')[0];
+                await supabase.storage.from('fotos_alumnos').remove([nombreArchivoViejo]);
+            }
+
+            const extension = archivo.originalname.split('.').pop();
+            const nuevoNombreArchivo = `${rutFormateado}_${Date.now()}.${extension}`;
+
+            const { error: storageError } = await supabase.storage
+                .from('fotos_alumnos')
+                .upload(nuevoNombreArchivo, archivo.buffer, {
+                    contentType: archivo.mimetype,
+                    upsert: true
+                });
+
+            if (storageError) throw storageError;
+
+            const { data: publicUrlData } = supabase.storage
+                .from('fotos_alumnos')
+                .getPublicUrl(nuevoNombreArchivo);
+
+            datosAActualizar.imagen = publicUrlData.publicUrl;
+        }
+
+        // Actualización única sobre la tabla 'usuario'
+        const { data: usuarioActualizado, error: userError } = await supabase
+            .from('usuario')
+            .update(datosAActualizar)
+            .eq('rut_usuario', rutFormateado)
+            .select()
+            .single();
+
+        if (userError) throw userError;
+
+        res.json({
+            mensaje: 'Perfil actualizado con éxito.',
+            usuario: usuarioActualizado
+        });
+
+    } catch (error) {
+        console.error("Error en PUT /alumnos/perfil:", error.message);
+        res.status(400).json({ error: error.message });
+    }
+});
+
     // 5. ELIMINAR ALUMNO (ACTUALIZADO CON CASCADA Y FORMATO DE RUT)
     app.delete('/alumnos/:rut', async (req, res) => {
         try {
