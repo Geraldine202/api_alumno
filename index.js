@@ -300,14 +300,14 @@ app.get('/docentes', async (req, res) => {
                     tipo_carrera(*)
                 ),
                 sede(descripcion),
-                estado_matricula(descripcion),
+                estado_matricula(id_estado_matricula, descripcion),
                 comuna(nombre_comuna),
                 puntaje_total(puntaje),
                 participacion_activa(total_actividades, estado),
                 validacion_usuario(*),
                 historial_academico(*)
             `)
-            .eq('id_tipo_usuario', 3); // <--- Exclusivo para Docentes
+            .eq('id_tipo_usuario', 3);
 
         if (error) throw error;
 
@@ -317,9 +317,15 @@ app.get('/docentes', async (req, res) => {
             const ha = Array.isArray(doc.historial_academico) ? doc.historial_academico[0] : doc.historial_academico;
             const actividadesCount = pa ? (pa.total_actividades || 0) : 0;
 
+            // Extraemos el id_estado_matricula real que viene de la tabla usuario de Supabase
+            const idEstadoReal = doc.id_estado_matricula !== undefined && doc.id_estado_matricula !== null
+                ? Number(doc.id_estado_matricula)
+                : Number(doc.estado_matricula?.id_estado_matricula);
+
             return {
                 ...doc,
-                // Asegura compatibilidad de nombres para la plantilla HTML
+                id_estado_matricula: idEstadoReal,
+                estado_descripcion: doc.estado_matricula?.descripcion || '',
                 nombre_completo: doc.nombre_completo || `${doc.nombre || ''} ${doc.apellido || doc.paterno || ''}`.trim() || 'Sin Nombre',
                 correo: doc.correo || doc.correo_institucional || doc.email || '',
                 jornada: doc.carrera?.jornada_carrera?.descripcion || '',
@@ -337,7 +343,36 @@ app.get('/docentes', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+// Endpoint exclusivo para obtener Responsables Activos para asignación de Actividades
+app.get('/responsables-activos', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('usuario')
+            .select(`
+                rut_usuario,
+                nombre_completo,
+                correo,
+                id_tipo_usuario,
+                id_estado_matricula
+            `)
+            .in('id_tipo_usuario', [2, 3, 4])  // Admins (2), Docentes (3), Consejeros (4)
+            .eq('id_estado_matricula', 1);     // Únicamente Matrícula Activa (1)
 
+        if (error) throw error;
+
+        const respuestaFormateada = data.map(u => ({
+            ...u,
+            rut_usuario: u.rut_usuario || '',
+            nombre_completo: u.nombre_completo || 'Responsable sin nombre',
+            correo: u.correo || ''
+        }));
+
+        res.json(respuestaFormateada);
+    } catch (error) {
+        console.error("Error en GET /responsables-activos:", error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
     // 2. OBTENER ALUMNO POR RUT
     app.get('/alumnos/:rut', async (req, res) => {
         try {
@@ -982,12 +1017,25 @@ app.post('/auth/login', async (req, res) => {
     // =========================================================================
     // 1. VALIDACIÓN DEL ADMIN CACHEADO / HARDCODEADO EN LA API
     // =========================================================================
-    const ADMIN_CORREO = process.env.ADMIN_EMAIL || 'admin@duocuc.cl';
-    const ADMIN_RUT = process.env.ADMIN_RUT || '11111111-1';
+    const ADMIN_CORREO = process.env.ADMIN_EMAIL || 'ge.inostrozam@duocuc.cl';
+    const ADMIN_RUT = process.env.ADMIN_RUT || '15.555.555-5';
     const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'admin123'; 
 
     if ((identificadorLower === ADMIN_CORREO.toLowerCase() || identificadorLower === ADMIN_RUT.toLowerCase()) && claveIngresada === ADMIN_PASS) {
+      
       const tokenAcceso = crypto.randomBytes(32).toString('hex');
+
+      // Guardar token de sesión en la tabla sesion_usuario
+      try {
+        await supabase
+          .from('sesion_usuario')
+          .upsert(
+            { rut_usuario: ADMIN_RUT, token_acceso: tokenAcceso },
+            { onConflict: 'rut_usuario' }
+          );
+      } catch (sessionErr) {
+        console.warn("[LOGIN ADMIN] Advertencia al guardar sesión en BD:", sessionErr.message);
+      }
 
       return res.json({
         mensaje: 'Autenticación exitosa (Administrador)',
@@ -995,17 +1043,17 @@ app.post('/auth/login', async (req, res) => {
           rut_usuario: ADMIN_RUT,
           nombre_completo: 'Administrador del Sistema',
           correo: ADMIN_CORREO,
-          id_tipo_usuario: 2, // ID Administrador
+          id_tipo_usuario: 2, // ID 2 = Administrador
           id_estado_matricula: 1,
           id_sede: 1,
-          cambio_clave_obligatorio: false // El admin NUNCA requiere cambio obligatorio
+          cambio_clave_obligatorio: false
         },
         token_acceso: tokenAcceso
       });
     }
 
     // =========================================================================
-    // 2. BÚSQUEDA EN BASE DE DATOS (Docentes, Alumnos y Admin registrado en BD)
+    // 2. BÚSQUEDA EN BASE DE DATOS (Estudiantes, Docentes, Administradores, Consejeros)
     // =========================================================================
     let usuario = null;
 
@@ -1013,7 +1061,7 @@ app.post('/auth/login', async (req, res) => {
     if (identificador.includes('@')) {
       const { data: userByEmail } = await supabase
         .from('usuario')
-        .select('*')
+        .select('*, tipo_usuario(descripcion)')
         .ilike('correo', identificadorLower)
         .limit(1);
 
@@ -1022,7 +1070,7 @@ app.post('/auth/login', async (req, res) => {
       }
     }
 
-    // B) Si no se encontró por correo, buscar por RUT
+    // B) Buscar por RUT si no se encontró por correo
     if (!usuario) {
       let rutFormateado = identificador;
       if (typeof formatearRutChile === 'function') {
@@ -1031,7 +1079,7 @@ app.post('/auth/login', async (req, res) => {
 
       const { data: userByRut } = await supabase
         .from('usuario')
-        .select('*')
+        .select('*, tipo_usuario(descripcion)')
         .or(`rut_usuario.eq.${rutFormateado},rut_usuario.eq.${identificador}`)
         .limit(1);
 
@@ -1045,7 +1093,7 @@ app.post('/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Correo/RUT o contraseña incorrectos.' });
     }
 
-    // Validar hash de contraseña en la base de datos con Bcrypt
+    // Validar hash con Bcrypt
     const hashGuardado = usuario.contrasenia || usuario.contrasena || usuario.password;
     if (!hashGuardado) {
       console.error(`[LOGIN] Usuario ${usuario.rut_usuario} no tiene hash asignado.`);
@@ -1058,7 +1106,7 @@ app.post('/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Correo/RUT o contraseña incorrectos.' });
     }
 
-    // Control de estados (2: Suspendido, 3: Inactivo/Retirado)
+    // Control de estados de la cuenta
     if (usuario.id_estado_matricula === 2) {
       return res.status(403).json({ error: 'El usuario se encuentra suspendido.' });
     }
@@ -1066,7 +1114,7 @@ app.post('/auth/login', async (req, res) => {
       return res.status(403).json({ error: 'El usuario se encuentra inactivo/deshabilitado.' });
     }
 
-    // Generar token de sesión
+    // Generar token y persistir sesión en la tabla sesion_usuario
     const tokenAcceso = crypto.randomBytes(32).toString('hex');
     try {
       await supabase
@@ -1080,8 +1128,8 @@ app.post('/auth/login', async (req, res) => {
     }
 
     // Determinar si exige cambio de clave:
-    // Si es Administrador (2) -> SIEMPRE false
-    // Si es Alumno (1) o Docente (3) -> Respeta el valor en la base de datos (por defecto true al crearse)
+    // Si id_tipo_usuario === 2 (Administrador) -> NUNCA exige cambio obligatorio (false)
+    // Si id_tipo_usuario es 1, 3 o 4 (Estudiante, Docente, Consejero) -> Respeta valor de BD
     const esAdmin = Number(usuario.id_tipo_usuario) === 2;
     const cambioObligatorio = esAdmin ? false : (usuario.cambio_clave_obligatorio ?? false);
 
@@ -1130,63 +1178,79 @@ app.post('/auth/login', async (req, res) => {
         }
     });
 
-    app.post('/auth/solicitar-recuperacion', async (req, res) => {
-        try {
-            const { correo } = req.body;
+app.post('/auth/solicitar-recuperacion', async (req, res) => {
+  try {
+    const { correo } = req.body;
 
-            if (!correo) return res.status(400).json({ error: 'El correo es obligatorio.' });
+    if (!correo || !correo.trim()) {
+      return res.status(400).json({ error: 'El correo es obligatorio.' });
+    }
 
-            const { data: usuario, error: userError } = await supabase
-                .from('usuario')
-                .select('rut_usuario')
-                .eq('correo', correo.trim())
-                .maybeSingle();
+    const correoLimpio = correo.trim().toLowerCase();
 
-            if (userError || !usuario) {
-                return res.status(404).json({ error: 'No existe un usuario con ese correo.' });
-            }
+    // 1. VALIDACIÓN DE FORMATO REGEX DE CORREO REAL
+    const regexEmail = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!regexEmail.test(correoLimpio)) {
+      return res.status(400).json({ error: 'El formato del correo electrónico es inválido.' });
+    }
 
-            const codigoNumerico = crypto.randomInt(100000, 1000000).toString();
-            const fechaExpiracion = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    // 2. VALIDACIÓN DE EXISTENCIA EN BASE DE DATOS SUPABASE
+    const { data: usuario, error: userError } = await supabase
+      .from('usuario')
+      .select('rut_usuario, correo')
+      .ilike('correo', correoLimpio)
+      .maybeSingle();
 
-            const { error: tokenError } = await supabase
-                .from('recuperar_contrasenia')
-                .insert([{
-                    token: codigoNumerico,
-                    fecha_expiracion: fechaExpiracion,
-                    usado: false,
-                    rut_usuario: usuario.rut_usuario
-                }]);
+    if (userError || !usuario) {
+      return res.status(404).json({ error: 'El correo ingresado no se encuentra registrado en el sistema.' });
+    }
 
-            if (tokenError) throw tokenError;
+    // 3. GENERACIÓN DE CÓDIGO DE 6 DÍGITOS Y GUARDADO EN TABLA
+    const codigoNumerico = crypto.randomInt(100000, 1000000).toString();
+    const fechaExpiracion = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
-            const mailOptions = {
-                from: `"Sistema de Asistencia" <${process.env.EMAIL_USER}>`,
-                to: correo,
-                subject: 'Tu código de verificación de contraseña',
-                text: `Tu código de verificación es: ${codigoNumerico}. Válido por 1 hora.`,
-                html: `
-                <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-                    <h2 style="color: #0056b3; text-align: center;">Código de Recuperación</h2>
-                    <p>Hola,</p>
-                    <p>Usa el siguiente código de 6 dígitos para restablecer tu contraseña:</p>
-                    <div style="background-color: #f4f6f8; padding: 15px; border-radius: 5px; text-align: center; margin: 20px 0;">
-                        <strong style="font-size: 32px; color: #111; letter-spacing: 5px;">${codigoNumerico}</strong>
-                    </div>
-                    <p style="font-size: 12px; color: #777;">Este código expira en 1 hora.</p>
-                </div>
-                `
-            };
+    const { error: tokenError } = await supabase
+      .from('recuperar_contrasenia')
+      .insert([{
+        token: codigoNumerico,
+        fecha_expiracion: fechaExpiracion,
+        usado: false,
+        rut_usuario: usuario.rut_usuario
+      }]);
 
-            await transporter.sendMail(mailOptions);
-            return res.json({ mensaje: 'Código enviado correctamente a tu correo.' });
+    if (tokenError) throw tokenError;
 
-        } catch (error) {
-            console.error('Error en recuperar contraseña:', error.message);
-            return res.status(500).json({ error: 'Error al enviar el código de recuperación.' });
-        }
-    });
+    // 4. ENVÍO DINÁMICO DEL CORREO AL DESTINATARIO SOLICITANTE
+    const mailOptions = {
+      from: `"Sistema de Asistencia" <${process.env.EMAIL_USER}>`,
+      to: correoLimpio,
+      subject: 'Tu código de verificación de contraseña',
+      text: `Tu código de verificación es: ${codigoNumerico}. Válido por 1 hora.`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+          <h2 style="color: #001e36; text-align: center;">Código de Recuperación</h2>
+          <p>Hola,</p>
+          <p>Has solicitado restablecer tu contraseña. Usa el siguiente código de 6 dígitos:</p>
+          <div style="background-color: #f4f6f8; padding: 15px; border-radius: 5px; text-align: center; margin: 20px 0;">
+            <strong style="font-size: 32px; color: #001e36; letter-spacing: 5px;">${codigoNumerico}</strong>
+          </div>
+          <p style="font-size: 12px; color: #777;">Este código expira en 1 hora.</p>
+        </div>
+      `
+    };
 
+    await transporter.sendMail(mailOptions);
+    return res.json({ mensaje: 'Código enviado correctamente a tu correo electrónico.' });
+
+  } catch (error) {
+    console.error('Error en recuperar contraseña:', error.message);
+    return res.status(500).json({ error: 'Error interno al enviar el código de recuperación.' });
+  }
+});
+
+// ==========================================
+// RESTABLECER CONTRASEÑA (CON TOKEN)
+// ==========================================
 app.post('/auth/restablecer-password', async (req, res) => {
     try {
         const tokenInput = req.body.token || req.body.codigo;
@@ -1225,8 +1289,29 @@ app.post('/auth/restablecer-password', async (req, res) => {
             return res.status(400).json({ error: 'El código ha expirado. Solicita uno nuevo.' });
         }
 
-        // Encriptación de la nueva contraseña
-        const passwordHash = await bcrypt.hash(nuevaPassword, 10);
+        // 1. Obtener la contraseña actual del usuario para comparar
+        const { data: usuarioActual, error: userError } = await supabase
+            .from('usuario')
+            .select('contrasenia')
+            .eq('rut_usuario', registroToken.rut_usuario)
+            .maybeSingle();
+
+        if (userError || !usuarioActual) {
+            return res.status(404).json({ error: 'Usuario no encontrado.' });
+        }
+
+        // 2. VALIDAR SI LA NUEVA CONTRASEÑA ES IGUAL A LA ANTERIOR
+        if (usuarioActual.contrasenia) {
+            const esIgual = await bcrypt.compare(nuevaPassword.toString().trim(), usuarioActual.contrasenia);
+            if (esIgual) {
+                return res.status(400).json({ 
+                    error: 'La contraseña ingresada ya ha sido utilizada previamente. Por seguridad, ingresa una contraseña diferente.' 
+                });
+            }
+        }
+
+        // 3. Encriptación de la nueva contraseña
+        const passwordHash = await bcrypt.hash(nuevaPassword.toString().trim(), 10);
 
         const { error: updateError } = await supabase
             .from('usuario')
@@ -1270,12 +1355,12 @@ app.put('/auth/cambiar-password-obligatorio', async (req, res) => {
             rutFormateado = formatearRutChile(rutSinPuntos);
         }
 
-        // 1. Buscar al usuario probando los formatos en un arreglo seguro (.in)
         const rutsABuscar = Array.from(new Set([rutEntrada, rutSinPuntos, rutFormateado]));
         
+        // 1. Traer la clave actual además de rut_usuario e id_tipo_usuario
         const { data: usuarios, error: userError } = await supabase
             .from('usuario')
-            .select('rut_usuario, id_tipo_usuario')
+            .select('rut_usuario, id_tipo_usuario, contrasenia')
             .in('rut_usuario', rutsABuscar)
             .limit(1);
 
@@ -1291,10 +1376,22 @@ app.put('/auth/cambiar-password-obligatorio', async (req, res) => {
             return res.status(403).json({ error: 'El Administrador no utiliza este flujo.' });
         }
 
-        // 2. Encriptar la nueva contraseña limpia
-        const nuevaPasswordHasheada = await bcrypt.hash(nueva_password.toString().trim(), 10);
+        const claveIngresada = nueva_password.toString().trim();
 
-        // 3. Actualizar contraseña y cambiar flag usando el RUT exacto guardado en la BD
+        // 2. VALIDAR SI LA NUEVA CONTRASEÑA ES IGUAL A LA ACTUAL
+        if (usuarioBD.contrasenia) {
+            const esIgual = await bcrypt.compare(claveIngresada, usuarioBD.contrasenia);
+            if (esIgual) {
+                return res.status(400).json({ 
+                    error: 'La contraseña ingresada ya ha sido utilizada previamente. Por seguridad, ingresa una contraseña diferente.' 
+                });
+            }
+        }
+
+        // 3. Encriptar la nueva contraseña limpia
+        const nuevaPasswordHasheada = await bcrypt.hash(claveIngresada, 10);
+
+        // 4. Actualizar contraseña y cambiar flag
         const { data: updateResult, error: updateError } = await supabase
             .from('usuario')
             .update({
@@ -1302,7 +1399,7 @@ app.put('/auth/cambiar-password-obligatorio', async (req, res) => {
                 cambio_clave_obligatorio: false
             })
             .eq('rut_usuario', usuarioBD.rut_usuario)
-            .select(); // <--- OBLIGATORIO: devuelve los registros modificados
+            .select();
 
         if (updateError) {
             console.error('[CAMBIO CLAVE ERROR] Error al actualizar en Supabase:', updateError.message);
@@ -1323,6 +1420,7 @@ app.put('/auth/cambiar-password-obligatorio', async (req, res) => {
         res.status(500).json({ error: 'Error al actualizar la contraseña.' });
     }
 });
+
 // ==========================================
 // CAMBIO DE CONTRASEÑA DESDE EL PERFIL
 // ==========================================
@@ -1338,10 +1436,10 @@ app.put('/auth/cambiar-password-perfil', async (req, res) => {
 
         const rutFormateado = formatearRutChile(rut_usuario);
 
-        // 1. Verificar si el usuario existe
+        // 1. Obtener usuario y su contraseña actual
         const { data: usuario, error: userError } = await supabase
             .from('usuario')
-            .select('rut_usuario')
+            .select('rut_usuario, contrasenia')
             .eq('rut_usuario', rutFormateado)
             .maybeSingle();
 
@@ -1354,10 +1452,22 @@ app.put('/auth/cambiar-password-perfil', async (req, res) => {
             return res.status(404).json({ error: 'Usuario no encontrado.' });
         }
 
-        // 2. Encriptar la nueva contraseña
-        const nuevaPasswordHasheada = await bcrypt.hash(nueva_password, 10);
+        const claveIngresada = nueva_password.toString().trim();
 
-        // 3. Actualizar contraseña y quitar bandera de cambio obligatorio si existía
+        // 2. VALIDAR SI LA NUEVA CONTRASEÑA ES IGUAL A LA ACTUAL
+        if (usuario.contrasenia) {
+            const esIgual = await bcrypt.compare(claveIngresada, usuario.contrasenia);
+            if (esIgual) {
+                return res.status(400).json({ 
+                    error: 'La contraseña ingresada ya ha sido utilizada previamente. Por seguridad, ingresa una contraseña diferente.' 
+                });
+            }
+        }
+
+        // 3. Encriptar la nueva contraseña
+        const nuevaPasswordHasheada = await bcrypt.hash(claveIngresada, 10);
+
+        // 4. Actualizar contraseña y quitar la bandera obligatoria si existía
         const { error: updateError } = await supabase
             .from('usuario')
             .update({
@@ -1378,7 +1488,6 @@ app.put('/auth/cambiar-password-perfil', async (req, res) => {
         return res.status(500).json({ error: 'Error del servidor al cambiar la contraseña.' });
     }
 });
-
 // =========================================================================
 // 1. CREAR DOCENTE Y ENVIAR CREDENCIALES POR CORREO (id_tipo_usuario: 3)
 // =========================================================================
