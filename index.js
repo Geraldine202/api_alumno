@@ -13,7 +13,7 @@
     app.use(cors());
     app.use(express.json());
 
-    const hash = bcrypt.hashSync('admin123', 10);
+    const hash = bcrypt.hashSync('Admin123.', 10);
     console.log(hash);
     // ==========================================
     // FUNCIÓN AUXILIAR DE FORMATEO DE RUT
@@ -451,6 +451,24 @@ app.post('/alumnos', upload.single('foto'), async (req, res) => {
             return res.status(400).json({ error: "El RUT, nombre completo y correo son obligatorios." });
         }
 
+        // =========================================================================
+        // VALIDACIÓN DE CORREO UNIFICADO EN TODA LA BASE DE DATOS
+        // Evita que se repita un correo de Alumno, Consejero, Docente o Admin
+        // =========================================================================
+        const correoLimpio = correo.trim().toLowerCase();
+
+        const { data: usuarioExistente } = await supabase
+            .from('usuario')
+            .select('rut_usuario')
+            .ilike('correo', correoLimpio)
+            .maybeSingle();
+
+        if (usuarioExistente) {
+            return res.status(400).json({ 
+                error: 'El correo electrónico ya se encuentra registrado por otro usuario en la plataforma.' 
+            });
+        }
+
         // Formatear RUT completo para identificador (ej: 12.345.678-K)
         rutCreado = formatearRutChile(rut_usuario);
 
@@ -489,7 +507,7 @@ app.post('/alumnos', upload.single('foto'), async (req, res) => {
                 rut_usuario: rutCreado,
                 nombre_completo,
                 genero,
-                correo,
+                correo: correoLimpio,
                 direccion,
                 telefono: telefono ? Number(telefono) : null,
                 fecha_nacimiento,
@@ -500,7 +518,7 @@ app.post('/alumnos', upload.single('foto'), async (req, res) => {
                 id_estado_matricula: id_estado_matricula || 1,
                 id_comuna: id_comuna || 1,
                 id_sede: id_sede || 1,
-                cambio_clave_obligatorio: true, // Obliga al usuario a cambiarla al primer inicio
+                cambio_clave_obligatorio: true,
                 contrasenia: contraseniaHasheada
             }])
             .select()
@@ -571,10 +589,9 @@ app.post('/alumnos', upload.single('foto'), async (req, res) => {
         // =========================================================================
         const mensajeBienvenida = `¡Bienvenido/a ${nombre_completo}! Tu cuenta ha sido creada. Tu contraseña por defecto son los primeros dígitos de tu RUT (sin puntos, sin guion ni dígito verificador): ${claveSinDv}`;
 
-        // Enviar correo electrónico
         const mailOptions = {
             from: `"Gestión Académica" <${process.env.EMAIL_USER}>`,
-            to: correo,
+            to: correoLimpio,
             subject: 'Creación de cuenta y credenciales de acceso',
             text: mensajeBienvenida,
             html: `
@@ -584,7 +601,7 @@ app.post('/alumnos', upload.single('foto'), async (req, res) => {
                 <p>Se ha registrado exitosamente tu cuenta de alumno.</p>
                 <p>Tus credenciales de acceso son:</p>
                 <ul>
-                    <li><strong>Correo:</strong> ${correo}</li>
+                    <li><strong>Correo:</strong> ${correoLimpio}</li>
                     <li><strong>Contraseña por defecto:</strong> ${claveSinDv} <em>(primeros números del RUT sin guion ni DV)</em></li>
                 </ul>
                 <div style="background-color: #f4f6f8; padding: 12px; border-radius: 5px; text-align: center; margin: 20px 0;">
@@ -600,9 +617,6 @@ app.post('/alumnos', upload.single('foto'), async (req, res) => {
             console.warn("No se pudo enviar el correo de bienvenida:", mailErr.message);
         }
 
-        // Guardar la notificación en la base de datos (id_tipo_notificacion = 2: Creación Cuenta)
-        // NOTA: Si en tu base de datos `notificacion.id_canje` es obligatorio (NOT NULL), 
-        // asegúrate de modificar la tabla en la BD para permitir NULL en id_canje para este tipo de notificaciones.
         try {
             await supabase.from('notificacion').insert([{
                 rut_usuario: rutCreado,
@@ -627,6 +641,7 @@ app.post('/alumnos', upload.single('foto'), async (req, res) => {
         res.status(400).json({ error: error.message });
     }
 });
+
 app.get('/notificaciones/:rut', async (req, res) => {
     try {
         const rutFormateado = formatearRutChile(decodeURIComponent(req.params.rut));
@@ -787,16 +802,22 @@ app.put('/alumnos/perfil/:rut', upload.single('foto'), async (req, res) => {
             datos = { ...req.body };
         }
 
-        // Extraemos únicamente los campos permitidos para la edición de perfil
-        const { direccion, telefono } = datos;
+        const { direccion, telefono, eliminar_imagen, eliminarImagen } = datos;
+        const solicitarEliminacion = eliminar_imagen === true || eliminar_imagen === 'true' || eliminarImagen === true || eliminarImagen === 'true';
+
         const datosAActualizar = {};
 
         if (direccion !== undefined) datosAActualizar.direccion = direccion;
         if (telefono !== undefined) datosAActualizar.telefono = telefono;
 
-        // Si subió una nueva imagen/foto
-        if (archivo) {
-            // Obtenemos la imagen actual para eliminarla del storage
+        // Nombre del bucket configurado en Supabase (ajusta a 'fotos alumnos' o 'fotos_alumnos' según corresponda)
+        const BUCKET_NAME = 'fotos_alumnos';
+
+        // ----------------------------------------------------------------------
+        // CASO 1: ELIMINACIÓN EXPLÍCITA DE LA FOTO
+        // ----------------------------------------------------------------------
+        if (solicitarEliminacion) {
+            // Consultar la imagen actual para eliminarla del storage
             const { data: usuarioActual } = await supabase
                 .from('usuario')
                 .select('imagen')
@@ -806,14 +827,33 @@ app.put('/alumnos/perfil/:rut', upload.single('foto'), async (req, res) => {
             if (usuarioActual && usuarioActual.imagen) {
                 const urlPartes = usuarioActual.imagen.split('/');
                 const nombreArchivoViejo = urlPartes[urlPartes.length - 1].split('?')[0];
-                await supabase.storage.from('fotos_alumnos').remove([nombreArchivoViejo]);
+                await supabase.storage.from(BUCKET_NAME).remove([nombreArchivoViejo]);
+            }
+
+            // Dejar en NULL la referencia en la base de datos
+            datosAActualizar.imagen = null;
+        } 
+        // ----------------------------------------------------------------------
+        // CASO 2: SUBIDA DE NUEVA FOTO (REEMPLAZA LA ANTERIOR)
+        // ----------------------------------------------------------------------
+        else if (archivo) {
+            const { data: usuarioActual } = await supabase
+                .from('usuario')
+                .select('imagen')
+                .eq('rut_usuario', rutFormateado)
+                .maybeSingle();
+
+            if (usuarioActual && usuarioActual.imagen) {
+                const urlPartes = usuarioActual.imagen.split('/');
+                const nombreArchivoViejo = urlPartes[urlPartes.length - 1].split('?')[0];
+                await supabase.storage.from(BUCKET_NAME).remove([nombreArchivoViejo]);
             }
 
             const extension = archivo.originalname.split('.').pop();
             const nuevoNombreArchivo = `${rutFormateado}_${Date.now()}.${extension}`;
 
             const { error: storageError } = await supabase.storage
-                .from('fotos_alumnos')
+                .from(BUCKET_NAME)
                 .upload(nuevoNombreArchivo, archivo.buffer, {
                     contentType: archivo.mimetype,
                     upsert: true
@@ -822,13 +862,13 @@ app.put('/alumnos/perfil/:rut', upload.single('foto'), async (req, res) => {
             if (storageError) throw storageError;
 
             const { data: publicUrlData } = supabase.storage
-                .from('fotos_alumnos')
+                .from(BUCKET_NAME)
                 .getPublicUrl(nuevoNombreArchivo);
 
             datosAActualizar.imagen = publicUrlData.publicUrl;
         }
 
-        // Actualización única sobre la tabla 'usuario'
+        // Actualización sobre la tabla 'usuario'
         const { data: usuarioActualizado, error: userError } = await supabase
             .from('usuario')
             .update(datosAActualizar)
@@ -1017,9 +1057,9 @@ app.post('/auth/login', async (req, res) => {
     // =========================================================================
     // 1. VALIDACIÓN DEL ADMIN CACHEADO / HARDCODEADO EN LA API
     // =========================================================================
-    const ADMIN_CORREO = process.env.ADMIN_EMAIL || 'ge.inostrozam@duocuc.cl';
-    const ADMIN_RUT = process.env.ADMIN_RUT || '15.555.555-5';
-    const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'admin123'; 
+    const ADMIN_CORREO = process.env.ADMIN_EMAIL || 'adminprime2@gmail.com';
+    const ADMIN_RUT = process.env.ADMIN_RUT || '22.696.846-6';
+    const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'Admin123.'; 
 
     if ((identificadorLower === ADMIN_CORREO.toLowerCase() || identificadorLower === ADMIN_RUT.toLowerCase()) && claveIngresada === ADMIN_PASS) {
       
@@ -1046,7 +1086,10 @@ app.post('/auth/login', async (req, res) => {
           id_tipo_usuario: 2, // ID 2 = Administrador
           id_estado_matricula: 1,
           id_sede: 1,
-          cambio_clave_obligatorio: false
+          cambio_clave_obligatorio: false,
+          puntaje_total: 0,
+          puntaje: 0,
+          puntos: 0
         },
         token_acceso: tokenAcceso
       });
@@ -1114,6 +1157,24 @@ app.post('/auth/login', async (req, res) => {
       return res.status(403).json({ error: 'El usuario se encuentra inactivo/deshabilitado.' });
     }
 
+    // =========================================================================
+    // 3. OBTENER PUNTAJE TOTAL DE ENTRADA (Evita demoras en el Frontend)
+    // =========================================================================
+    let puntajeReal = 0;
+    try {
+      const { data: puntajeData } = await supabase
+        .from('puntaje_total')
+        .select('puntaje')
+        .eq('rut_usuario', usuario.rut_usuario)
+        .maybeSingle();
+
+      if (puntajeData && puntajeData.puntaje !== undefined) {
+        puntajeReal = Number(puntajeData.puntaje);
+      }
+    } catch (ptsErr) {
+      console.warn("[LOGIN] No se pudo consultar puntaje_total previa:", ptsErr.message);
+    }
+
     // Generar token y persistir sesión en la tabla sesion_usuario
     const tokenAcceso = crypto.randomBytes(32).toString('hex');
     try {
@@ -1128,8 +1189,6 @@ app.post('/auth/login', async (req, res) => {
     }
 
     // Determinar si exige cambio de clave:
-    // Si id_tipo_usuario === 2 (Administrador) -> NUNCA exige cambio obligatorio (false)
-    // Si id_tipo_usuario es 1, 3 o 4 (Estudiante, Docente, Consejero) -> Respeta valor de BD
     const esAdmin = Number(usuario.id_tipo_usuario) === 2;
     const cambioObligatorio = esAdmin ? false : (usuario.cambio_clave_obligatorio ?? false);
 
@@ -1141,7 +1200,10 @@ app.post('/auth/login', async (req, res) => {
       mensaje: 'Autenticación exitosa',
       usuario: {
         ...usuario,
-        cambio_clave_obligatorio: cambioObligatorio
+        cambio_clave_obligatorio: cambioObligatorio,
+        puntaje_total: puntajeReal,
+        puntaje: puntajeReal,
+        puntos: puntajeReal
       },
       token_acceso: tokenAcceso
     });
@@ -1151,8 +1213,6 @@ app.post('/auth/login', async (req, res) => {
     res.status(500).json({ error: 'Error interno del servidor.', detalle: error.message });
   }
 });
-
-
 
     app.post('/auth/logout', async (req, res) => {
         try {
