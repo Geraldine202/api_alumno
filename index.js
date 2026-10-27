@@ -424,223 +424,236 @@ app.get('/responsables-activos', async (req, res) => {
     });
 
     // 3. CREAR ALUMNO
-app.post('/alumnos', upload.single('foto'), async (req, res) => {
-    let nombreArchivoGuardado = null;
-    let rutCreado = null;
+// 3. CREAR ALUMNO
+    app.post('/alumnos', upload.single('foto'), async (req, res) => {
+        let nombreArchivoGuardado = null;
+        let rutCreado = null;
 
-    try {
-        const archivo = req.file;
-        let urlImagenFinal = null;
-        let datosAlumno;
+        try {
+            const archivo = req.file;
+            let urlImagenFinal = null;
+            let datosAlumno;
 
-        if (req.body.datos) {
-            datosAlumno = typeof req.body.datos === 'string' ? JSON.parse(req.body.datos) : req.body.datos;
-        } else {
-            datosAlumno = req.body || {};
-        }
+            if (req.body.datos) {
+                datosAlumno = typeof req.body.datos === 'string' ? JSON.parse(req.body.datos) : req.body.datos;
+            } else {
+                datosAlumno = req.body || {};
+            }
 
-        const { 
-            rut_usuario, nombre_completo, genero, correo, direccion, 
-            telefono, fecha_nacimiento, id_tipo_usuario, 
-            id_periodo_academico, id_estado_matricula, id_comuna, id_sede,
-            id_escuela, id_carrera, id_requisito,
-            puntaje_total, actividades_inscritas, historial_academico_resumen
-        } = datosAlumno;
+            const { 
+                rut_usuario, nombre_completo, genero, correo, direccion, 
+                telefono, fecha_nacimiento, id_tipo_usuario, 
+                id_periodo_academico, id_estado_matricula, id_comuna, id_sede,
+                id_escuela, id_carrera, id_requisito,
+                puntaje_total, actividades_inscritas, historial_academico_resumen
+            } = datosAlumno;
 
-        if (!rut_usuario || !nombre_completo || !correo) {
-            return res.status(400).json({ error: "El RUT, nombre completo y correo son obligatorios." });
-        }
+            if (!rut_usuario || !nombre_completo || !correo) {
+                return res.status(400).json({ error: "El RUT, nombre completo y correo son obligatorios." });
+            }
 
-        // =========================================================================
-        // VALIDACIÓN DE CORREO UNIFICADO EN TODA LA BASE DE DATOS
-        // Evita que se repita un correo de Alumno, Consejero, Docente o Admin
-        // =========================================================================
-        const correoLimpio = correo.trim().toLowerCase();
+            // Formatear RUT completo para identificador (ej: 12.345.678-K)
+            rutCreado = formatearRutChile(rut_usuario);
 
-        const { data: usuarioExistente } = await supabase
-            .from('usuario')
-            .select('rut_usuario')
-            .ilike('correo', correoLimpio)
-            .maybeSingle();
+            // =========================================================================
+            // 1. VALIDACIÓN PREVIA DE RUT DUPLICADO
+            // =========================================================================
+            const { data: rutExistente } = await supabase
+                .from('usuario')
+                .select('rut_usuario')
+                .eq('rut_usuario', rutCreado)
+                .maybeSingle();
 
-        if (usuarioExistente) {
-            return res.status(400).json({ 
-                error: 'El correo electrónico ya se encuentra registrado por otro usuario en la plataforma.' 
-            });
-        }
-
-        // Formatear RUT completo para identificador (ej: 12.345.678-K)
-        rutCreado = formatearRutChile(rut_usuario);
-
-        // =========================================================================
-        // 1. GENERAR CLAVE INICIAL: RUT SOLO NÚMEROS (sin puntos, guion ni DV)
-        // =========================================================================
-        const rutLimpio = rut_usuario.toString().replace(/[^0-9kK]/g, '');
-        const claveSinDv = rutLimpio.slice(0, -1); // Remueve el dígito verificador
-        const contraseniaHasheada = await bcrypt.hash(claveSinDv, 10);
-
-        // Subida de imagen al Storage de Supabase
-        if (archivo) {
-            const extension = archivo.originalname.split('.').pop();
-            nombreArchivoGuardado = `${rutCreado}_${Date.now()}.${extension}`;
-            
-            const { error: storageError } = await supabase.storage
-                .from('fotos_alumnos')
-                .upload(nombreArchivoGuardado, archivo.buffer, {
-                    contentType: archivo.mimetype,
-                    upsert: true
+            if (rutExistente) {
+                return res.status(400).json({ 
+                    error: 'El RUT ingresado ya se encuentra registrado por otro usuario en la plataforma.' 
                 });
+            }
 
-            if (storageError) throw storageError;
+            // =========================================================================
+            // 2. VALIDACIÓN PREVIA DE CORREO DUPLICADO
+            // =========================================================================
+            const correoLimpio = correo.trim().toLowerCase();
 
-            const { data: publicUrlData } = supabase.storage
-                .from('fotos_alumnos')
-                .getPublicUrl(nombreArchivoGuardado);
+            const { data: correoExistente } = await supabase
+                .from('usuario')
+                .select('rut_usuario')
+                .ilike('correo', correoLimpio)
+                .maybeSingle();
 
-            urlImagenFinal = publicUrlData.publicUrl;
-        }
+            if (correoExistente) {
+                return res.status(400).json({ 
+                    error: 'El correo electrónico ya se encuentra registrado por otro usuario en la plataforma.' 
+                });
+            }
 
-        // 2. Inserción en la tabla usuario
-        const { data: usuarioCreado, error: userError } = await supabase
-            .from('usuario')
-            .insert([{
-                rut_usuario: rutCreado,
-                nombre_completo,
-                genero,
-                correo: correoLimpio,
-                direccion,
-                telefono: telefono ? Number(telefono) : null,
-                fecha_nacimiento,
-                imagen: urlImagenFinal, 
-                id_carrera: id_carrera ? Number(id_carrera) : null,
-                id_tipo_usuario: id_tipo_usuario || 1,
-                id_periodo_academico: id_periodo_academico || 1,
-                id_estado_matricula: id_estado_matricula || 1,
-                id_comuna: id_comuna || 1,
-                id_sede: id_sede || 1,
-                cambio_clave_obligatorio: true,
-                contrasenia: contraseniaHasheada
-            }])
-            .select()
-            .single();
+            // =========================================================================
+            // 3. GENERAR CLAVE INICIAL: RUT SOLO NÚMEROS (sin puntos, guion ni DV)
+            // =========================================================================
+            const rutLimpio = rut_usuario.toString().replace(/[^0-9kK]/g, '');
+            const claveSinDv = rutLimpio.slice(0, -1);
+            const contraseniaHasheada = await bcrypt.hash(claveSinDv, 10);
 
-        if (userError) throw userError;
+            // Subida de imagen al Storage de Supabase
+            if (archivo) {
+                const extension = archivo.originalname.split('.').pop();
+                nombreArchivoGuardado = `${rutCreado}_${Date.now()}.${extension}`;
+                
+                const { error: storageError } = await supabase.storage
+                    .from('fotos_alumnos')
+                    .upload(nombreArchivoGuardado, archivo.buffer, {
+                        contentType: archivo.mimetype,
+                        upsert: true
+                    });
 
-        const fechaVigenciaDefault = new Date();
-        fechaVigenciaDefault.setFullYear(fechaVigenciaDefault.getFullYear() + 1);
+                if (storageError) throw storageError;
 
-        const totalActividades = Number(actividades_inscritas || 0);
+                const { data: publicUrlData } = supabase.storage
+                    .from('fotos_alumnos')
+                    .getPublicUrl(nombreArchivoGuardado);
 
-        try {
-            const insercionesAsociadas = [
-                supabase.from('puntaje_total').insert([{
+                urlImagenFinal = publicUrlData.publicUrl;
+            }
+
+            // 4. Inserción en la tabla usuario
+            const { data: usuarioCreado, error: userError } = await supabase
+                .from('usuario')
+                .insert([{
                     rut_usuario: rutCreado,
-                    puntaje: Number(puntaje_total || 0),
-                    vigencia: fechaVigenciaDefault.toISOString()
-                }]),
-                supabase.from('historial_puntos').insert([{
-                    rut_usuario: rutCreado,
-                    puntos_actuales: Number(puntaje_total || 0),
-                    puntos_canjeados: 0,
-                    puntos_totales_obtenidos: Number(puntaje_total || 0)
-                }]),
-                supabase.from('participacion_activa').insert([{
-                    rut_usuario: rutCreado,
-                    total_actividades: totalActividades,
-                    estado: totalActividades > 1 ? 'Activo' : 'Inactivo',
-                    id_periodo_academico: id_periodo_academico || 1
-                }]),
-                supabase.from('validacion_usuario').insert([{
-                    rut_usuario: rutCreado,
-                    matriculado: datosAlumno.matriculado !== undefined ? Boolean(datosAlumno.matriculado) : true,
-                    suspension: datosAlumno.suspension !== undefined ? Boolean(datosAlumno.suspension) : false,
-                    sumario: datosAlumno.sumario !== undefined ? Boolean(datosAlumno.sumario) : false,
-                    cumple: true,
-                    observacion: datosAlumno.observacion || 'Alumno habilitado',
-                    id_requisito: id_requisito || null
+                    nombre_completo,
+                    genero,
+                    correo: correoLimpio,
+                    direccion,
+                    telefono: telefono ? Number(telefono) : null,
+                    fecha_nacimiento,
+                    imagen: urlImagenFinal, 
+                    id_carrera: id_carrera ? Number(id_carrera) : null,
+                    id_tipo_usuario: id_tipo_usuario || 1,
+                    id_periodo_academico: id_periodo_academico || 1,
+                    id_estado_matricula: id_estado_matricula || 1,
+                    id_comuna: id_comuna || 1,
+                    id_sede: id_sede || 1,
+                    cambio_clave_obligatorio: true,
+                    contrasenia: contraseniaHasheada
                 }])
-            ];
+                .select()
+                .single();
 
-            if (id_escuela || historial_academico_resumen) {
-                insercionesAsociadas.push(
-                    supabase.from('historial_academico').insert([{
+            if (userError) throw userError;
+
+            const fechaVigenciaDefault = new Date();
+            fechaVigenciaDefault.setFullYear(fechaVigenciaDefault.getFullYear() + 1);
+
+            const totalActividades = Number(actividades_inscritas || 0);
+
+            try {
+                const insercionesAsociadas = [
+                    supabase.from('puntaje_total').insert([{
                         rut_usuario: rutCreado,
-                        tipo_evento: 'INGRESO',
-                        id_escuela: id_escuela || null,
-                        descripcion: historial_academico_resumen || 'Registro inicial'
+                        puntaje: Number(puntaje_total || 0),
+                        vigencia: fechaVigenciaDefault.toISOString()
+                    }]),
+                    supabase.from('historial_puntos').insert([{
+                        rut_usuario: rutCreado,
+                        puntos_actuales: Number(puntaje_total || 0),
+                        puntos_canjeados: 0,
+                        puntos_totales_obtenidos: Number(puntaje_total || 0)
+                    }]),
+                    supabase.from('participacion_activa').insert([{
+                        rut_usuario: rutCreado,
+                        total_actividades: totalActividades,
+                        estado: totalActividades > 1 ? 'Activo' : 'Inactivo',
+                        id_periodo_academico: id_periodo_academico || 1
+                    }]),
+                    supabase.from('validacion_usuario').insert([{
+                        rut_usuario: rutCreado,
+                        matriculado: datosAlumno.matriculado !== undefined ? Boolean(datosAlumno.matriculado) : true,
+                        suspension: datosAlumno.suspension !== undefined ? Boolean(datosAlumno.suspension) : false,
+                        sumario: datosAlumno.sumario !== undefined ? Boolean(datosAlumno.sumario) : false,
+                        cumple: true,
+                        observacion: datosAlumno.observacion || 'Alumno habilitado',
+                        id_requisito: id_requisito || null
                     }])
-                );
+                ];
+
+                if (id_escuela || historial_academico_resumen) {
+                    insercionesAsociadas.push(
+                        supabase.from('historial_academico').insert([{
+                            rut_usuario: rutCreado,
+                            tipo_evento: 'INGRESO',
+                            id_escuela: id_escuela || null,
+                            descripcion: historial_academico_resumen || 'Registro inicial'
+                        }])
+                    );
+                }
+
+                await Promise.all(insercionesAsociadas);
+
+            } catch (errorRelaciones) {
+                if (rutCreado) {
+                    await supabase.from('usuario').delete().eq('rut_usuario', rutCreado);
+                }
+                if (nombreArchivoGuardado) {
+                    await supabase.storage.from('fotos_alumnos').remove([nombreArchivoGuardado]);
+                }
+                throw new Error(`Fallo en la creación de registros vinculados: ${errorRelaciones.message}`);
             }
 
-            await Promise.all(insercionesAsociadas);
+            // 5. ENVÍO DE CORREO DE BIENVENIDA Y NOTIFICACIÓN
+            const mensajeBienvenida = `¡Bienvenido/a ${nombre_completo}! Tu cuenta ha sido creada. Tu contraseña por defecto son los primeros dígitos de tu RUT (sin puntos, sin guion ni dígito verificador): ${claveSinDv}`;
 
-        } catch (errorRelaciones) {
-            if (rutCreado) {
-                await supabase.from('usuario').delete().eq('rut_usuario', rutCreado);
-            }
-            if (nombreArchivoGuardado) {
-                await supabase.storage.from('fotos_alumnos').remove([nombreArchivoGuardado]);
-            }
-            throw new Error(`Fallo en la creación de registros vinculados: ${errorRelaciones.message}`);
-        }
-
-        // =========================================================================
-        // 3. ENVÍO DE CORREO DE BIENVENIDA Y NOTIFICACIÓN
-        // =========================================================================
-        const mensajeBienvenida = `¡Bienvenido/a ${nombre_completo}! Tu cuenta ha sido creada. Tu contraseña por defecto son los primeros dígitos de tu RUT (sin puntos, sin guion ni dígito verificador): ${claveSinDv}`;
-
-        const mailOptions = {
-            from: `"Gestión Académica" <${process.env.EMAIL_USER}>`,
-            to: correoLimpio,
-            subject: 'Creación de cuenta y credenciales de acceso',
-            text: mensajeBienvenida,
-            html: `
-            <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-                <h2 style="color: #0056b3; text-align: center;">¡Bienvenido/a al Sistema!</h2>
-                <p>Hola <strong>${nombre_completo}</strong>,</p>
-                <p>Se ha registrado exitosamente tu cuenta de alumno.</p>
-                <p>Tus credenciales de acceso son:</p>
-                <ul>
-                    <li><strong>Correo:</strong> ${correoLimpio}</li>
-                    <li><strong>Contraseña por defecto:</strong> ${claveSinDv} <em>(primeros números del RUT sin guion ni DV)</em></li>
-                </ul>
-                <div style="background-color: #f4f6f8; padding: 12px; border-radius: 5px; text-align: center; margin: 20px 0;">
-                    <p style="margin:0; font-size: 13px; color: #555;">Recuerda cambiar tu contraseña en tu primer inicio de sesión por seguridad.</p>
+            const mailOptions = {
+                from: `"Gestión Académica" <${process.env.EMAIL_USER}>`,
+                to: correoLimpio,
+                subject: 'Creación de cuenta y credenciales de acceso',
+                text: mensajeBienvenida,
+                html: `
+                <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+                    <h2 style="color: #0056b3; text-align: center;">¡Bienvenido/a al Sistema!</h2>
+                    <p>Hola <strong>${nombre_completo}</strong>,</p>
+                    <p>Se ha registrado exitosamente tu cuenta de alumno.</p>
+                    <p>Tus credenciales de acceso son:</p>
+                    <ul>
+                        <li><strong>Correo:</strong> ${correoLimpio}</li>
+                        <li><strong>Contraseña por defecto:</strong> ${claveSinDv} <em>(primeros números del RUT sin guion ni DV)</em></li>
+                    </ul>
+                    <div style="background-color: #f4f6f8; padding: 12px; border-radius: 5px; text-align: center; margin: 20px 0;">
+                        <p style="margin:0; font-size: 13px; color: #555;">Recuerda cambiar tu contraseña en tu primer inicio de sesión por seguridad.</p>
+                    </div>
                 </div>
-            </div>
-            `
-        };
+                `
+            };
 
-        try {
-            await transporter.sendMail(mailOptions);
-        } catch (mailErr) {
-            console.warn("No se pudo enviar el correo de bienvenida:", mailErr.message);
+            try {
+                await transporter.sendMail(mailOptions);
+            } catch (mailErr) {
+                console.warn("No se pudo enviar el correo de bienvenida:", mailErr.message);
+            }
+
+            try {
+                await supabase.from('notificacion').insert([{
+                    rut_usuario: rutCreado,
+                    mensaje: mensajeBienvenida,
+                    fecha_envio: new Date().toISOString(),
+                    leido: false,
+                    id_tipo_notificacion: 2
+                }]);
+            } catch (notiErr) {
+                console.warn("No se pudo registrar la notificación en la BD:", notiErr.message);
+            }
+
+            delete usuarioCreado.contrasenia;
+
+            res.status(201).json({
+                mensaje: 'Alumno registrado correctamente con todos sus atributos.',
+                usuario: usuarioCreado
+            });
+
+        } catch (error) {
+            console.error("Error en POST /alumnos:", error.message);
+            res.status(400).json({ error: error.message });
         }
-
-        try {
-            await supabase.from('notificacion').insert([{
-                rut_usuario: rutCreado,
-                mensaje: mensajeBienvenida,
-                fecha_envio: new Date().toISOString(),
-                leido: false,
-                id_tipo_notificacion: 2 // Creación Cuenta
-            }]);
-        } catch (notiErr) {
-            console.warn("No se pudo registrar la notificación en la BD:", notiErr.message);
-        }
-
-        delete usuarioCreado.contrasenia;
-
-        res.status(201).json({
-            mensaje: 'Alumno registrado correctamente con todos sus atributos.',
-            usuario: usuarioCreado
-        });
-
-    } catch (error) {
-        console.error("Error en POST /alumnos:", error.message);
-        res.status(400).json({ error: error.message });
-    }
-});
+    });
 
 app.get('/notificaciones/:rut', async (req, res) => {
     try {
@@ -1616,148 +1629,179 @@ app.put('/auth/cambiar-password-perfil', async (req, res) => {
 // =========================================================================
 // 1. CREAR DOCENTE Y ENVIAR CREDENCIALES POR CORREO (id_tipo_usuario: 3)
 // =========================================================================
-app.post('/docentes', upload.single('foto'), async (req, res) => {
-    let nombreArchivoGuardado = null;
-    let rutCreado = null;
+// CREAR DOCENTE
+    app.post('/docentes', upload.single('foto'), async (req, res) => {
+        let nombreArchivoGuardado = null;
+        let rutCreado = null;
 
-    try {
-        const archivo = req.file;
-        let urlImagenFinal = null;
-        let datosDocente;
+        try {
+            const archivo = req.file;
+            let urlImagenFinal = null;
+            let datosDocente;
 
-        if (req.body.datos) {
-            datosDocente = typeof req.body.datos === 'string' ? JSON.parse(req.body.datos) : req.body.datos;
-        } else {
-            datosDocente = req.body || {};
-        }
+            if (req.body.datos) {
+                datosDocente = typeof req.body.datos === 'string' ? JSON.parse(req.body.datos) : req.body.datos;
+            } else {
+                datosDocente = req.body || {};
+            }
 
-        const { 
-            rut_usuario, nombre_completo, genero, correo, direccion, 
-            telefono, fecha_nacimiento, id_sede, password,
-            id_periodo_academico, id_estado_matricula, id_comuna
-        } = datosDocente;
+            const { 
+                rut_usuario, nombre_completo, genero, correo, direccion, 
+                telefono, fecha_nacimiento, id_sede, password,
+                id_periodo_academico, id_estado_matricula, id_comuna
+            } = datosDocente;
 
-        if (!rut_usuario || !nombre_completo || !correo || !id_sede) {
-            return res.status(400).json({ error: "El RUT, nombre completo, correo y sede son obligatorios." });
-        }
+            if (!rut_usuario || !nombre_completo || !correo || !id_sede) {
+                return res.status(400).json({ error: "El RUT, nombre completo, correo y sede son obligatorios." });
+            }
 
-        // Formatear RUT completo para identificador (ej: 12.345.678-K)
-        rutCreado = formatearRutChile(rut_usuario);
+            // Formatear RUT completo para identificador (ej: 12.345.678-K)
+            rutCreado = formatearRutChile(rut_usuario);
 
-        // =========================================================================
-        // 1. GENERAR CLAVE INICIAL: RUT SOLO NÚMEROS (sin puntos, guion ni DV)
-        // =========================================================================
-        const rutLimpio = rut_usuario.toString().replace(/[^0-9kK]/g, '');
-        const claveSinDv = rutLimpio.slice(0, -1);
-        const claveAUsar = (password && password.trim() !== '') ? password.trim() : claveSinDv;
+            // =========================================================================
+            // 1. VALIDACIÓN PREVIA DE RUT DUPLICADO
+            // =========================================================================
+            const { data: rutExistente } = await supabase
+                .from('usuario')
+                .select('rut_usuario')
+                .eq('rut_usuario', rutCreado)
+                .maybeSingle();
 
-        const contraseniaHasheada = await bcrypt.hash(claveAUsar, 10);
-
-        // Subida de imagen al Storage de Supabase
-        if (archivo) {
-            const extension = archivo.originalname.split('.').pop();
-            nombreArchivoGuardado = `docente_${rutCreado}_${Date.now()}.${extension}`;
-            
-            const { error: storageError } = await supabase.storage
-                .from('fotos_alumnos')
-                .upload(nombreArchivoGuardado, archivo.buffer, {
-                    contentType: archivo.mimetype,
-                    upsert: true
+            if (rutExistente) {
+                return res.status(400).json({ 
+                    error: 'El RUT ingresado ya se encuentra registrado por otro usuario en la plataforma.' 
                 });
+            }
 
-            if (storageError) throw storageError;
+            // =========================================================================
+            // 2. VALIDACIÓN PREVIA DE CORREO DUPLICADO
+            // =========================================================================
+            const correoLimpio = correo.trim().toLowerCase();
 
-            const { data: publicUrlData } = supabase.storage
-                .from('fotos_alumnos')
-                .getPublicUrl(nombreArchivoGuardado);
+            const { data: correoExistente } = await supabase
+                .from('usuario')
+                .select('rut_usuario')
+                .ilike('correo', correoLimpio)
+                .maybeSingle();
 
-            urlImagenFinal = publicUrlData.publicUrl;
-        }
+            if (correoExistente) {
+                return res.status(400).json({ 
+                    error: 'El correo electrónico ya se encuentra registrado por otro usuario en la plataforma.' 
+                });
+            }
 
-        // 2. Inserción en la tabla usuario (Valores por defecto aplicados como en alumnos)
-        const { data: docenteCreado, error: userError } = await supabase
-            .from('usuario')
-            .insert([{
-                rut_usuario: rutCreado,
-                nombre_completo,
-                genero: genero || 'Masculino',
-                correo,
-                direccion: direccion || 'Sin especificar',
-                telefono: telefono ? String(telefono) : ' ',
-                fecha_nacimiento: fecha_nacimiento || null,
-                imagen: urlImagenFinal,
-                id_tipo_usuario: 3, // ID asignado para Docentes
-                id_sede: Number(id_sede),
-                id_periodo_academico: id_periodo_academico || 1,
-                id_estado_matricula: id_estado_matricula || 1, // 1: Activo
-                id_comuna: id_comuna || 1,
-                cambio_clave_obligatorio: true, // Obliga al docente a cambiarla al primer inicio
-                contrasenia: contraseniaHasheada
-            }])
-            .select()
-            .single();
+            // =========================================================================
+            // 3. GENERAR CLAVE INICIAL: RUT SOLO NÚMEROS (sin puntos, guion ni DV)
+            // =========================================================================
+            const rutLimpio = rut_usuario.toString().replace(/[^0-9kK]/g, '');
+            const claveSinDv = rutLimpio.slice(0, -1);
+            const claveAUsar = (password && password.trim() !== '') ? password.trim() : claveSinDv;
 
-        if (userError) throw userError;
+            const contraseniaHasheada = await bcrypt.hash(claveAUsar, 10);
 
-        // =========================================================================
-        // 3. ENVÍO DE CORREO DE BIENVENIDA Y NOTIFICACIÓN
-        // =========================================================================
-        const mensajeBienvenida = `¡Bienvenido/a Profesor/a ${nombre_completo}! Su cuenta docente ha sido habilitada. Su contraseña de acceso inicial es: ${claveAUsar}`;
+            // Subida de imagen al Storage de Supabase
+            if (archivo) {
+                const extension = archivo.originalname.split('.').pop();
+                nombreArchivoGuardado = `docente_${rutCreado}_${Date.now()}.${extension}`;
+                
+                const { error: storageError } = await supabase.storage
+                    .from('fotos_alumnos')
+                    .upload(nombreArchivoGuardado, archivo.buffer, {
+                        contentType: archivo.mimetype,
+                        upsert: true
+                    });
 
-        // Enviar correo electrónico
-        const mailOptions = {
-            from: `"Gestión Académica" <${process.env.EMAIL_USER}>`,
-            to: correo,
-            subject: 'Creación de cuenta docente y credenciales de acceso',
-            text: mensajeBienvenida,
-            html: `
-            <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
-                <h2 style="color: #0056b3; text-align: center;">¡Bienvenido/a al Panel Docente!</h2>
-                <p>Estimado/a profesor/a <strong>${nombre_completo}</strong>,</p>
-                <p>Le informamos que se ha registrado exitosamente su cuenta docente en la plataforma institucional.</p>
-                <p>A continuación se detallan sus credenciales de acceso:</p>
-                <ul>
-                    <li><strong>Correo Institucional:</strong> ${correo}</li>
-                    <li><strong>Contraseña inicial:</strong> ${claveAUsar}</li>
-                </ul>
-                <div style="background-color: #f4f6f8; padding: 12px; border-radius: 5px; text-align: center; margin: 20px 0;">
-                    <p style="margin:0; font-size: 13px; color: #555;">Por motivos de seguridad, recuerde cambiar su contraseña al iniciar sesión por primera vez.</p>
+                if (storageError) throw storageError;
+
+                const { data: publicUrlData } = supabase.storage
+                    .from('fotos_alumnos')
+                    .getPublicUrl(nombreArchivoGuardado);
+
+                urlImagenFinal = publicUrlData.publicUrl;
+            }
+
+            // 4. Inserción en la tabla usuario
+            const { data: docenteCreado, error: userError } = await supabase
+                .from('usuario')
+                .insert([{
+                    rut_usuario: rutCreado,
+                    nombre_completo,
+                    genero: genero || 'Masculino',
+                    correo: correoLimpio,
+                    direccion: direccion || 'Sin especificar',
+                    telefono: telefono ? String(telefono) : ' ',
+                    fecha_nacimiento: fecha_nacimiento || null,
+                    imagen: urlImagenFinal,
+                    id_tipo_usuario: 3, // ID asignado para Docentes
+                    id_sede: Number(id_sede),
+                    id_periodo_academico: id_periodo_academico || 1,
+                    id_estado_matricula: id_estado_matricula || 1, // 1: Activo
+                    id_comuna: id_comuna || 1,
+                    cambio_clave_obligatorio: true,
+                    contrasenia: contraseniaHasheada
+                }])
+                .select()
+                .single();
+
+            if (userError) throw userError;
+
+            // =========================================================================
+            // 5. ENVÍO DE CORREO DE BIENVENIDA Y NOTIFICACIÓN
+            // =========================================================================
+            const mensajeBienvenida = `¡Bienvenido/a Profesor/a ${nombre_completo}! Su cuenta docente ha sido habilitada. Su contraseña de acceso inicial es: ${claveAUsar}`;
+
+            const mailOptions = {
+                from: `"Gestión Académica" <${process.env.EMAIL_USER}>`,
+                to: correoLimpio,
+                subject: 'Creación de cuenta docente y credenciales de acceso',
+                text: mensajeBienvenida,
+                html: `
+                <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+                    <h2 style="color: #0056b3; text-align: center;">¡Bienvenido/a al Panel Docente!</h2>
+                    <p>Estimado/a profesor/a <strong>${nombre_completo}</strong>,</p>
+                    <p>Le informamos que se ha registrado exitosamente su cuenta docente en la plataforma institucional.</p>
+                    <p>A continuación se detallan sus credenciales de acceso:</p>
+                    <ul>
+                        <li><strong>Correo Institucional:</strong> ${correoLimpio}</li>
+                        <li><strong>Contraseña inicial:</strong> ${claveAUsar}</li>
+                    </ul>
+                    <div style="background-color: #f4f6f8; padding: 12px; border-radius: 5px; text-align: center; margin: 20px 0;">
+                        <p style="margin:0; font-size: 13px; color: #555;">Por motivos de seguridad, recuerde cambiar su contraseña al iniciar sesión por primera vez.</p>
+                    </div>
                 </div>
-            </div>
-            `
-        };
+                `
+            };
 
-        try {
-            await transporter.sendMail(mailOptions);
-        } catch (mailErr) {
-            console.warn("No se pudo enviar el correo al docente:", mailErr.message);
+            try {
+                await transporter.sendMail(mailOptions);
+            } catch (mailErr) {
+                console.warn("No se pudo enviar el correo al docente:", mailErr.message);
+            }
+
+            try {
+                await supabase.from('notificacion').insert([{
+                    rut_usuario: rutCreado,
+                    mensaje: mensajeBienvenida,
+                    fecha_envio: new Date().toISOString(),
+                    leido: false,
+                    id_tipo_notificacion: 2
+                }]);
+            } catch (notiErr) {
+                console.warn("No se pudo registrar la notificación en la BD:", notiErr.message);
+            }
+
+            delete docenteCreado.contrasenia;
+
+            res.status(201).json({
+                mensaje: 'Docente registrado correctamente con todos sus atributos.',
+                usuario: docenteCreado
+            });
+
+        } catch (error) {
+            console.error("Error en POST /docentes:", error.message);
+            res.status(400).json({ error: error.message });
         }
-
-        // Registrar notificación interna
-        try {
-            await supabase.from('notificacion').insert([{
-                rut_usuario: rutCreado,
-                mensaje: mensajeBienvenida,
-                fecha_envio: new Date().toISOString(),
-                leido: false,
-                id_tipo_notificacion: 2 // Creación Cuenta
-            }]);
-        } catch (notiErr) {
-            console.warn("No se pudo registrar la notificación en la BD:", notiErr.message);
-        }
-
-        delete docenteCreado.contrasenia;
-
-        res.status(201).json({
-            mensaje: 'Docente registrado correctamente con todos sus atributos.',
-            usuario: docenteCreado
-        });
-
-    } catch (error) {
-        console.error("Error en POST /docentes:", error.message);
-        res.status(400).json({ error: error.message });
-    }
-});
+    });
 // =========================================================================
 // 2. EDITAR DOCENTE (Nombre, Correo, Género, Sede)
 // =========================================================================
