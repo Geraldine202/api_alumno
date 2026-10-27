@@ -664,6 +664,7 @@ app.get('/notificaciones/:rut', async (req, res) => {
     }
 });
     // 4. EDITAR ALUMNO
+// 4. EDITAR ALUMNO / USUARIO (CON RETORNO HIDRATADO)
     app.put('/alumnos/:rut', upload.single('foto'), async (req, res) => {
         try {
             const rutFormateado = formatearRutChile(decodeURIComponent(req.params.rut));
@@ -688,6 +689,10 @@ app.get('/notificaciones/:rut', async (req, res) => {
 
             if (datosUsuario.id_carrera !== undefined) {
                 datosUsuario.id_carrera = datosUsuario.id_carrera ? Number(datosUsuario.id_carrera) : null;
+            }
+
+            if (datosUsuario.id_tipo_usuario !== undefined) {
+                datosUsuario.id_tipo_usuario = Number(datosUsuario.id_tipo_usuario);
             }
 
             if (archivo) {
@@ -722,15 +727,15 @@ app.get('/notificaciones/:rut', async (req, res) => {
                 datosUsuario.imagen = publicUrlData.publicUrl;
             }
 
-            const { data: usuarioActualizado, error: userError } = await supabase
+            // 1. Actualizar usuario principal
+            const { error: userError } = await supabase
                 .from('usuario')
                 .update(datosUsuario)
-                .eq('rut_usuario', rutFormateado)
-                .select()
-                .single();
+                .eq('rut_usuario', rutFormateado);
 
             if (userError) throw userError;
 
+            // 2. Actualizaciones secundarias
             const actualizacionesSecundarias = [];
 
             const datosValidacion = {};
@@ -778,9 +783,47 @@ app.get('/notificaciones/:rut', async (req, res) => {
                 await Promise.all(actualizacionesSecundarias);
             }
 
+            // 3. CONSULTAR EL USUARIO COMPLETO CON SUS RELACIONES (JOINs)
+            const { data: usuarioCompleto, error: getError } = await supabase
+                .from('usuario')
+                .select(`
+                    *,
+                    carrera(
+                        *,
+                        jornada_carrera(*),
+                        tipo_carrera(*)
+                    ),
+                    sede(descripcion),
+                    estado_matricula(id_estado_matricula, descripcion),
+                    comuna(nombre_comuna),
+                    puntaje_total(puntaje),
+                    participacion_activa(total_actividades, estado),
+                    validacion_usuario(*),
+                    historial_academico(*)
+                `)
+                .eq('rut_usuario', rutFormateado)
+                .single();
+
+            if (getError) throw getError;
+
+            const pt = Array.isArray(usuarioCompleto.puntaje_total) ? usuarioCompleto.puntaje_total[0] : usuarioCompleto.puntaje_total;
+            const pa = Array.isArray(usuarioCompleto.participacion_activa) ? usuarioCompleto.participacion_activa[0] : usuarioCompleto.participacion_activa;
+            const ha = Array.isArray(usuarioCompleto.historial_academico) ? usuarioCompleto.historial_academico[0] : usuarioCompleto.historial_academico;
+            const actividadesCount = pa ? (pa.total_actividades || 0) : 0;
+
+            const usuarioRespuesta = {
+                ...usuarioCompleto,
+                jornada: usuarioCompleto.carrera?.jornada_carrera?.descripcion || '',
+                tipo_carrera: usuarioCompleto.carrera?.tipo_carrera?.descripcion || '',
+                puntaje_total: pt ? pt.puntaje : 0,
+                actividades_inscritas: actividadesCount,
+                participacion_activa: actividadesCount > 1,
+                historial_academico_resumen: ha ? ha.descripcion : ''
+            };
+
             res.json({
                 mensaje: 'Información del alumno y registros asociados actualizados con éxito.',
-                usuario: usuarioActualizado
+                usuario: usuarioRespuesta
             });
 
         } catch (error) {
@@ -1065,7 +1108,6 @@ app.post('/auth/login', async (req, res) => {
       
       const tokenAcceso = crypto.randomBytes(32).toString('hex');
 
-      // Guardar token de sesión en la tabla sesion_usuario
       try {
         await supabase
           .from('sesion_usuario')
@@ -1096,15 +1138,28 @@ app.post('/auth/login', async (req, res) => {
     }
 
     // =========================================================================
-    // 2. BÚSQUEDA EN BASE DE DATOS (Estudiantes, Docentes, Administradores, Consejeros)
+    // 2. BÚSQUEDA EN BASE DE DATOS (CONSULTA HIDRATADA CON TODAS LAS RELACIONES)
     // =========================================================================
     let usuario = null;
+    const selectHidratado = `
+      *,
+      carrera(
+        *,
+        jornada_carrera(*),
+        tipo_carrera(*)
+      ),
+      sede(descripcion),
+      estado_matricula(id_estado_matricula, descripcion),
+      comuna(nombre_comuna),
+      tipo_usuario(id_tipo_usuario, descripcion),
+      validacion_usuario(*)
+    `;
 
     // A) Buscar por correo
     if (identificador.includes('@')) {
       const { data: userByEmail } = await supabase
         .from('usuario')
-        .select('*, tipo_usuario(descripcion)')
+        .select(selectHidratado)
         .ilike('correo', identificadorLower)
         .limit(1);
 
@@ -1122,7 +1177,7 @@ app.post('/auth/login', async (req, res) => {
 
       const { data: userByRut } = await supabase
         .from('usuario')
-        .select('*, tipo_usuario(descripcion)')
+        .select(selectHidratado)
         .or(`rut_usuario.eq.${rutFormateado},rut_usuario.eq.${identificador}`)
         .limit(1);
 
@@ -1158,7 +1213,7 @@ app.post('/auth/login', async (req, res) => {
     }
 
     // =========================================================================
-    // 3. OBTENER PUNTAJE TOTAL DE ENTRADA (Evita demoras en el Frontend)
+    // 3. OBTENER PUNTAJE TOTAL DE ENTRADA
     // =========================================================================
     let puntajeReal = 0;
     try {
@@ -1188,8 +1243,15 @@ app.post('/auth/login', async (req, res) => {
       console.warn("[LOGIN] Advertencia al guardar sesión:", sessionErr.message);
     }
 
+    // Extraer id_tipo_usuario garantizando su conversión numérica
+    const idTipoReal = Number(
+      usuario.id_tipo_usuario ?? 
+      usuario.tipo_usuario?.id_tipo_usuario ?? 
+      1
+    );
+
     // Determinar si exige cambio de clave:
-    const esAdmin = Number(usuario.id_tipo_usuario) === 2;
+    const esAdmin = idTipoReal === 2;
     const cambioObligatorio = esAdmin ? false : (usuario.cambio_clave_obligatorio ?? false);
 
     delete usuario.contrasenia;
@@ -1200,10 +1262,13 @@ app.post('/auth/login', async (req, res) => {
       mensaje: 'Autenticación exitosa',
       usuario: {
         ...usuario,
+        id_tipo_usuario: idTipoReal,
         cambio_clave_obligatorio: cambioObligatorio,
         puntaje_total: puntajeReal,
         puntaje: puntajeReal,
-        puntos: puntajeReal
+        puntos: puntajeReal,
+        jornada: usuario.carrera?.jornada_carrera?.descripcion || '',
+        tipo_carrera: usuario.carrera?.tipo_carrera?.descripcion || ''
       },
       token_acceso: tokenAcceso
     });
